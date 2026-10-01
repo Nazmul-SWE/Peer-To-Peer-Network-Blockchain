@@ -1,0 +1,6 @@
+# PeerLink uses only the Python standard library (Python 3.9+).
+# Nothing to install with pip.
+#
+# Tkinter ships with Python on Windows and macOS.
+# On Debian/Ubuntu/Kali:   sudo apt install python3-tk
+# On Fedora:               sudo dnf install python3-tkinter
