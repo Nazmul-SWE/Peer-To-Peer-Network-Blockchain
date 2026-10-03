@@ -37,6 +37,7 @@ Only the standard library is used.
 from __future__ import annotations
 
 import json
+import re
 import socket
 import struct
 import uuid
@@ -104,15 +105,35 @@ def make_file(peer_id: str, name: str, filename: str, filesize: int) -> dict:
             "filename": filename, "filesize": filesize}
 
 
-def make_error(reason: str) -> dict:
-    return {"type": MSG_ERROR, "reason": reason}
+def make_error(reason: str, code: str = "") -> dict:
+    message = {"type": MSG_ERROR, "reason": reason}
+    if code:
+        message["code"] = code
+    return message
 
 
-def parse_handshake(message: dict) -> Tuple[str, str, int]:
-    """Validate a hello / hello_ack and return ``(peer_id, name, port)``."""
+def normalize_type(value: str) -> str:
+    """'Hello-Ack', 'HELLO ACK' and 'hello_ack' all mean the same thing.
+    Being liberal in what we accept keeps peers written by different students
+    (or different versions) interoperable."""
+    return re.sub(r"[\s\-]+", "_", value.strip().lower())
+
+
+def parse_handshake(message: dict, default_port: Optional[int] = None) -> Tuple[str, str, int]:
+    """
+    Validate a hello / hello_ack and return ``(peer_id, name, port)``.
+
+    Tolerant of harmless variations (numeric id, "name" instead of
+    "peer_name", port sent as a digit string, port missing -> ``default_port``)
+    but strict about anything that would make the data meaningless.
+    """
     peer_id = message.get("peer_id")
-    name = message.get("peer_name")
-    port = message.get("port")
+    if isinstance(peer_id, int) and not isinstance(peer_id, bool):
+        peer_id = str(peer_id)
+    name = message.get("peer_name", message.get("name"))
+    port = message.get("port", default_port)
+    if isinstance(port, str) and port.strip().isdigit():
+        port = int(port.strip())
 
     if not isinstance(peer_id, str) or not 1 <= len(peer_id) <= 64:
         raise ProtocolError("handshake has an invalid peer_id")
@@ -121,6 +142,15 @@ def parse_handshake(message: dict) -> Tuple[str, str, int]:
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise ProtocolError("handshake has an invalid port")
     return peer_id, name.strip()[:MAX_NAME_LENGTH], port
+
+
+def preview(message: dict, limit: int = 140) -> str:
+    """Short one-line rendering of a message, for error messages and logs."""
+    try:
+        text = json.dumps(message, ensure_ascii=False)
+    except (TypeError, ValueError):
+        text = repr(message)
+    return text if len(text) <= limit else text[:limit] + "..."
 
 
 # --------------------------------------------------------------------------
@@ -175,6 +205,7 @@ def recv_message(sock: socket.socket) -> dict:
 
     if not isinstance(message, dict) or not isinstance(message.get("type"), str):
         raise ProtocolError("message must be a JSON object with a 'type'")
+    message["type"] = normalize_type(message["type"])
     return message
 
 

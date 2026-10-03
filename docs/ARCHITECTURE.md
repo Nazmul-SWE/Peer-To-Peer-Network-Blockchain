@@ -104,6 +104,9 @@ It writes to `name.part` and renames on success, so a half-received file can nev
 | `TCP_NODELAY`, `SO_KEEPALIVE` | low latency chat; dead peers are eventually detected |
 | Generation counter in the GUI | events from a stopped node can never leak into a new session |
 | Duplicate / self connection rejected by `peer_id` | avoids ghost double entries |
+| Simultaneous connect tie-break | if both peers click Connect at once there are briefly two TCP connections; both sides keep the one dialled by the smaller `peer_id`, the loser closes silently |
+| 0.6 s disconnect grace for brand-new connections | the losing duplicate must not flash "peer disconnected" |
+| Liberal handshake parsing (`Hello-Ack`, `hello ack`, port as string, missing port) | interoperates with other students' implementations; unexpected replies produce an error naming the received type |
 
 ## 5. Not implemented (explicitly out of scope per section 15 of the assignment)
 

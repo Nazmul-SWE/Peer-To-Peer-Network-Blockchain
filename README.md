@@ -95,6 +95,33 @@ The **Event Log** tab keeps a timestamped record of every connection, message, f
 
 ![Event log](screenshots/05_event_log.png)
 
+## Troubleshooting two computers (LAN)
+
+Work through these in order - the first one that fails is your problem.
+
+1. **Same network?** Both PCs on the same Wi-Fi/router. A guest network, a phone hotspot or
+   "client/AP isolation" on the router blocks PC-to-PC traffic.
+2. **Use the right IP.** A PC often has several addresses (Wi-Fi, VirtualBox `192.168.56.1`, VMware, WSL).
+   PeerLink lists all of them in the sidebar - give the other person the one that matches your
+   Wi-Fi (usually `192.168.x.x` / `10.x.x.x`). Never type `127.0.0.1` for another computer.
+3. **Firewall.** The first time Python listens, Windows asks to allow it - choose *Allow* on **Private networks**.
+   Otherwise: Windows Defender Firewall -> *Allow an app* -> Python.
+4. **Run the probe** (no GUI, standard library only) to see exactly what happens:
+   ```bash
+   # PC-A (receiver) - without starting PeerLink on that port
+   python tools/probe.py --listen 5000
+   # PC-B
+   python tools/probe.py <PC-A address> 5000
+   ```
+   `TCP connected` on both screens -> network and firewall are fine. Then start PeerLink on PC-A and run
+   `python tools/probe.py <PC-A address> 5000` again: it prints the peer's raw reply to HELLO and tells
+   you if the other PC is running a different program/version.
+5. **Both PCs must run this same project.** The error
+   `expected 'hello_ack' ... peer answered with message type 'X'` means the program on the other side
+   answered with something else - it is not this version of PeerLink (or another service owns that port).
+6. **Both clicked Connect at once?** That is now handled automatically: exactly one connection is kept
+   and the other is closed silently.
+
 ## Error handling
 
 | Situation | What the user sees |
@@ -122,6 +149,8 @@ P2P_Network/
 ├── protocol.py          # message framing, message types, receive helpers
 ├── utils.py             # validation, filename safety, formatting, LAN address
 ├── requirements.txt     # (stdlib only)
+├── tools/
+│   └── probe.py         # LAN diagnostic: shows addresses, tests TCP + HELLO, prints the raw reply
 ├── README.md
 ├── downloads/           # received files are stored here
 ├── docs/
@@ -159,7 +188,7 @@ Details and diagrams: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## Running the tests
 
 ```bash
-python -m unittest discover -s tests -v          # 44 tests: framing, handshake, text, files, multi-peer, errors
+python -m unittest discover -s tests -v          # 56 tests: framing, handshake, text, files, multi-peer, errors
 python tests/gui_smoke.py                        # drives 3 GUI windows (needs a display)
 python tests/gui_smoke.py --screenshots          # also regenerates ./screenshots (needs Pillow)
 ```

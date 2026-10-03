@@ -104,13 +104,41 @@ class FramingTests(unittest.TestCase):
         for bad in ({"peer_id": "", "peer_name": "x", "port": 1},
                     {"peer_id": "a", "peer_name": "", "port": 1},
                     {"peer_id": "a", "peer_name": "x", "port": 0},
-                    {"peer_id": "a", "peer_name": "x", "port": "5000"},
+                    {"peer_id": "a", "peer_name": "x", "port": "abc"},
                     {"peer_id": "a", "peer_name": "x", "port": True}):
             with self.assertRaises(protocol.ProtocolError):
                 protocol.parse_handshake(bad)
 
 
+class InteropTests(unittest.TestCase):
+    def test_type_names_are_normalised(self):
+        for raw in ("hello_ack", "HELLO_ACK", "Hello-Ack", " hello ack "):
+            self.assertEqual(protocol.normalize_type(raw), "hello_ack")
+
+    def test_recv_message_normalises_type(self):
+        a, b = socket.socketpair()
+        try:
+            a.sendall(protocol.encode_message({"type": "Hello-Ack", "peer_id": "x"}))
+            self.assertEqual(protocol.recv_message(b)["type"], "hello_ack")
+        finally:
+            a.close(); b.close()
+
+    def test_handshake_variants(self):
+        ok = protocol.parse_handshake({"peer_id": 42, "name": "Zed", "port": "5005"})
+        self.assertEqual(ok, ("42", "Zed", 5005))
+        self.assertEqual(protocol.parse_handshake({"peer_id": "a", "peer_name": "b"}, default_port=7000)[2], 7000)
+        with self.assertRaises(protocol.ProtocolError):
+            protocol.parse_handshake({"peer_id": "a", "peer_name": "b"})
+
+    def test_preview_truncates(self):
+        self.assertTrue(protocol.preview({"x": "y" * 500}).endswith("..."))
+
+
 class UtilsTests(unittest.TestCase):
+    def test_local_ips(self):
+        ips = utils.get_local_ips()
+        self.assertTrue(ips and all(a.count(".") == 3 for a in ips))
+
     def test_validate_port(self):
         self.assertEqual(utils.validate_port("5000"), 5000)
         for bad in ("", "abc", "0", "65536", "-1", "50 00", "5000.5", "²"):

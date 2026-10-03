@@ -1,10 +1,30 @@
 """
-gui.py - PeerLink user interface ("Nebula" dark theme)
-======================================================
+gui.py - PeerLink user interface (standard light theme, responsive)
+===================================================================
 
 This file contains ONLY presentation code.  It never touches a socket: it
 calls methods on a ``PeerNode`` (start / stop / connect_to_peer / send_text /
 send_file) and renders the events that come back.
+
+Design
+------
+A conventional, familiar chat layout: white top bar, a sidebar with the
+peer controls and the peer list, and a conversation area with the message
+box at the bottom.  Neutral greys plus ONE accent (standard blue); green
+means connected / start, red means disconnect / error.
+
+Responsive behaviour
+--------------------
+The window can be resized freely (minimum 600 x 600).
+
+* Wide window (>= 860 px): sidebar and conversation sit side by side.  The
+  sidebar width follows the window (270 - 360 px).
+* Narrow window (< 860 px): "single panel" mode, like a phone app.  Either
+  the sidebar (peer list) or the conversation is shown.  Choosing a peer
+  opens its conversation and a "Back" button returns to the peer list.
+* Chat bubbles re-wrap to about 2/3 of the conversation width.
+* Secondary text (tagline, hint line, downloads path) hides when space is
+  short, and long button labels shorten.
 
 Thread safety
 -------------
@@ -14,15 +34,15 @@ be touched from the main thread.  The node's callback therefore just puts
 that queue every 40 ms on the Tk thread.  The ``generation`` number makes the
 GUI ignore stale events from a node that has already been stopped.
 
-Layout
-------
+Layout (wide)
+-------------
     +--------------------------------------------------------------+
-    |  header: logo . status pill . LAN address                    |
+    |  top bar: logo . title . status pill                         |
     +-------------------+------------------------------------------+
-    |  MY PEER          |  selected peer header      [Disconnect]  |
-    |  CONNECT          |  Conversation | Event Log                |
-    |  CONNECTED PEERS  |  ...bubbles / log...                     |
-    |                   |  [ message ........ ] [Send] [Send File] |
+    |  My peer          |  selected peer header      [Disconnect]  |
+    |  Connect          |  Conversation | Event log                |
+    |  Connected peers  |  ...bubbles / log...                     |
+    |                   |  [ message ........ ] [Send] [Send file] |
     +-------------------+------------------------------------------+
     |  status bar                                                  |
     +--------------------------------------------------------------+
@@ -47,31 +67,63 @@ DOWNLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downlo
 POLL_MS = 40
 MAX_CHAT_RENDER = 300          # newest messages drawn per conversation
 MAX_LOG_LINES = 2000
-BUBBLE_WRAP = 430              # pixels
+BUBBLE_WRAP = 430              # default bubble width in pixels (adapts on resize)
+
+COMPACT_W = 860                # below this width: single-panel mode
+WIDE_TEXT_W = 960              # tagline visible from this width
+PATH_TEXT_W = 900              # downloads path in status bar visible from this width
 
 
 # --------------------------------------------------------------------------
-# Palette - "Nebula": deep ink navy, electric violet, mint and amber
+# Palette - standard light UI: neutral greys + one blue accent
 # --------------------------------------------------------------------------
 class C:
-    BG = "#0a0f1f"
-    SURFACE = "#111936"
-    SURFACE_2 = "#18224a"
-    BORDER = "#26336b"
-    TEXT = "#e9edff"
-    MUTED = "#8f9bc9"
-    DIM = "#5a6598"
-    PRIMARY = "#7c5cff"
-    PRIMARY_HOVER = "#947aff"
-    MINT = "#2ee6c5"
-    MINT_HOVER = "#63f0d6"
-    AMBER = "#ffb454"
-    DANGER = "#ff5d73"
-    DANGER_BG = "#3b1830"
-    DANGER_HOVER = "#55203f"
-    BUBBLE_ME = "#6246e6"
-    BUBBLE_THEM = "#1c2756"
-    AVATARS = ["#7c5cff", "#2ee6c5", "#ffb454", "#ff6b9a", "#4cc9f0", "#a3e635"]
+    BG = "#f0f2f5"             # window background
+    SURFACE = "#ffffff"        # cards, bars
+    SURFACE_2 = "#f6f8fa"      # inputs, subtle fills
+    BORDER = "#d8dee4"
+    TEXT = "#1f2328"
+    MUTED = "#59636e"
+    DIM = "#8c959f"
+    PRIMARY = "#0b6bcb"
+    PRIMARY_HOVER = "#0958a8"
+    PRIMARY_SOFT = "#e6f1fc"
+    LOGO_2 = "#58a6ff"
+    SUCCESS = "#1a7f37"
+    SUCCESS_HOVER = "#156d2e"
+    SUCCESS_DOT = "#2da44e"
+    WARN = "#9a6700"
+    WARN_DOT = "#d4a72c"
+    DANGER = "#cf222e"
+    DANGER_BG = "#ffebe9"
+    DANGER_HOVER = "#ffd8d3"
+    DISABLED_BG = "#e6e9ed"
+    DISABLED_FG = "#9aa4b1"
+    CHAT_BG = "#f5f7fa"
+    BUBBLE_ME = "#0b6bcb"
+    BUBBLE_THEM = "#e8ebef"
+    BADGE = "#cf222e"
+    AVATARS = ["#0b6bcb", "#1a7f37", "#bf5f00", "#a5399f", "#0e7c86", "#6f42c1"]
+
+
+# file-type tiles: (extensions, background, foreground)
+_FILE_KINDS = (
+    ({"png", "jpg", "jpeg", "gif", "bmp", "webp", "svg"}, "#ddf4ff", "#0550ae"),
+    ({"mp3", "wav", "flac", "ogg", "m4a", "aac"}, "#fbefff", "#6f2fa8"),
+    ({"mp4", "mkv", "avi", "mov", "webm"}, "#ffebe9", "#a0111f"),
+    ({"pdf", "doc", "docx", "txt", "md", "xls", "xlsx", "ppt", "pptx", "csv"}, "#dafbe1", "#116329"),
+    ({"zip", "rar", "7z", "tar", "gz"}, "#fff8c5", "#7d4e00"),
+)
+
+
+def file_badge(filename: str):
+    """Return (label, bg, fg) for the file-type tile."""
+    ext = os.path.splitext(filename)[1].lstrip(".").lower()
+    label = (ext.upper()[:4]) or "FILE"
+    for group, bg, fg in _FILE_KINDS:
+        if ext in group:
+            return label, bg, fg
+    return label, "#eaeef2", "#424a53"
 
 
 def pick_font(root: tk.Misc, candidates, fallback: str) -> str:
@@ -82,13 +134,22 @@ def pick_font(root: tk.Misc, candidates, fallback: str) -> str:
     return fallback
 
 
+def set_visible(widget: tk.Misc, visible: bool, **pack_opts) -> None:
+    """Show/hide a packed widget without re-packing it every time."""
+    shown = bool(widget.winfo_manager())
+    if visible and not shown:
+        widget.pack(**pack_opts)
+    elif not visible and shown:
+        widget.pack_forget()
+
+
 # --------------------------------------------------------------------------
 # Small custom widgets (plain tk so colours look identical on every OS)
 # --------------------------------------------------------------------------
 class FlatButton(tk.Label):
     STYLES = {
         "primary": (C.PRIMARY, C.PRIMARY_HOVER, "#ffffff"),
-        "success": (C.MINT, C.MINT_HOVER, "#04211b"),
+        "success": (C.SUCCESS, C.SUCCESS_HOVER, "#ffffff"),
         "danger": (C.DANGER_BG, C.DANGER_HOVER, C.DANGER),
         "ghost": (C.SURFACE_2, C.BORDER, C.TEXT),
     }
@@ -114,22 +175,22 @@ class FlatButton(tk.Label):
         if enabled:
             self.configure(bg=self._bg, fg=self._fg, cursor="hand2")
         else:
-            self.configure(bg=C.SURFACE_2, fg=C.DIM, cursor="arrow")
+            self.configure(bg=C.DISABLED_BG, fg=C.DISABLED_FG, cursor="arrow")
 
     def set_text(self, text: str) -> None:
         self.configure(text=text)
 
 
 class Field(tk.Frame):
-    """Small caption + dark entry with a violet focus ring."""
+    """Caption above a standard text input with a blue focus ring."""
 
     def __init__(self, parent, caption: str, value: str, font, small_font, width: int = 10) -> None:
         super().__init__(parent, bg=C.SURFACE)
-        tk.Label(self, text=caption.upper(), bg=C.SURFACE, fg=C.MUTED, font=small_font).pack(anchor="w")
+        tk.Label(self, text=caption, bg=C.SURFACE, fg=C.MUTED, font=small_font).pack(anchor="w")
         self.entry = tk.Entry(
-            self, font=font, width=width, bg=C.SURFACE_2, fg=C.TEXT, insertbackground=C.TEXT,
+            self, font=font, width=width, bg=C.SURFACE, fg=C.TEXT, insertbackground=C.TEXT,
             relief="flat", bd=0, highlightthickness=1, highlightbackground=C.BORDER,
-            highlightcolor=C.PRIMARY, disabledbackground=C.BG, disabledforeground=C.DIM)
+            highlightcolor=C.PRIMARY, disabledbackground=C.SURFACE_2, disabledforeground=C.DIM)
         self.entry.pack(fill="x", ipady=6, pady=(3, 0))
         self.entry.insert(0, value)
 
@@ -143,7 +204,7 @@ class Field(tk.Frame):
 class Card(tk.Frame):
     def __init__(self, parent, title: str, small_bold) -> None:
         super().__init__(parent, bg=C.SURFACE, highlightthickness=1, highlightbackground=C.BORDER)
-        self.title_label = tk.Label(self, text=title, bg=C.SURFACE, fg=C.PRIMARY_HOVER, font=small_bold)
+        self.title_label = tk.Label(self, text=title, bg=C.SURFACE, fg=C.TEXT, font=small_bold)
         self.title_label.pack(anchor="w", padx=14, pady=(12, 6))
         self.body = tk.Frame(self, bg=C.SURFACE)
         self.body.pack(fill="x", padx=14, pady=(0, 14))
@@ -153,12 +214,12 @@ class Avatar(tk.Canvas):
     def __init__(self, parent, text: str, color: str, size: int = 38, bg: str = C.SURFACE, font=None) -> None:
         super().__init__(parent, width=size, height=size, bg=bg, highlightthickness=0, bd=0)
         self.create_oval(1, 1, size - 1, size - 1, fill=color, outline="")
-        self.create_text(size // 2, size // 2, text=(text[:1] or "?").upper(), fill="#0a0f1f", font=font)
+        self.create_text(size // 2, size // 2, text=(text[:1] or "?").upper(), fill="#ffffff", font=font)
 
 
 class ProgressBar(tk.Canvas):
     def __init__(self, parent) -> None:
-        super().__init__(parent, height=6, bg=C.SURFACE_2, highlightthickness=0, bd=0)
+        super().__init__(parent, height=6, bg=C.BORDER, highlightthickness=0, bd=0)
         self._fraction = 0.0
         self.bind("<Configure>", lambda _e: self._draw())
 
@@ -169,7 +230,7 @@ class ProgressBar(tk.Canvas):
     def _draw(self) -> None:
         self.delete("all")
         width = self.winfo_width()
-        self.create_rectangle(0, 0, int(width * self._fraction), 6, fill=C.MINT, outline="")
+        self.create_rectangle(0, 0, int(width * self._fraction), 6, fill=C.PRIMARY, outline="")
 
 
 class ScrollFrame(tk.Frame):
@@ -178,7 +239,7 @@ class ScrollFrame(tk.Frame):
     def __init__(self, parent, bg: str = C.SURFACE) -> None:
         super().__init__(parent, bg=bg)
         self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
-        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview, style="Nebula.Vertical.TScrollbar")
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview, style="Std.Vertical.TScrollbar")
         self.inner = tk.Frame(self.canvas, bg=bg)
         self._window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
@@ -223,16 +284,16 @@ class App:
         self.downloads_dir = downloads_dir
         root.title("PeerLink - P2P Network  |  CSE 433")
         root.geometry("1120x720")
-        root.minsize(980, 640)
+        root.minsize(600, 600)
         root.configure(bg=C.BG)
 
         base = pick_font(root, ("Segoe UI", "SF Pro Text", "Helvetica Neue", "Ubuntu", "Noto Sans", "DejaVu Sans", "Arial"), "TkDefaultFont")
         mono = pick_font(root, ("Cascadia Mono", "Consolas", "Menlo", "DejaVu Sans Mono", "Courier New"), "TkFixedFont")
         self.f_body = (base, 10)
         self.f_bold = (base, 10, "bold")
-        self.f_small = (base, 8)
-        self.f_small_bold = (base, 8, "bold")
-        self.f_title = (base, 17, "bold")
+        self.f_small = (base, 9)
+        self.f_small_bold = (base, 9, "bold")
+        self.f_title = (base, 16, "bold")
         self.f_head = (base, 12, "bold")
         self.f_mono = (mono, 9)
         self.f_mono_bold = (mono, 9, "bold")
@@ -253,27 +314,38 @@ class App:
         self._transfer: Optional[dict] = None
         self._toast_job: Optional[str] = None
         self._color_counter = 0
-        self.local_ip = utils.get_local_ip()
+        self.local_ips = utils.get_local_ips()
+        self.local_ip = self.local_ips[0]
+
+        # --- responsive state --------------------------------------------
+        self.compact = False                 # single-panel mode
+        self.panel = "chat"                  # which panel shows in compact mode
+        self._bubble_wrap = BUBBLE_WRAP
+        self._resize_job: Optional[str] = None
 
         default_name = default_name or (os.environ.get("USERNAME") or os.environ.get("USER") or "Peer")[:24]
 
         self._build_header()
         self._build_statusbar()
-        body = tk.Frame(root, bg=C.BG)
-        body.pack(fill="both", expand=True, padx=14, pady=(0, 6))
-        self._build_sidebar(body, default_name, default_port)
-        self._build_main(body)
+        self.body = tk.Frame(root, bg=C.BG)
+        self.body.pack(fill="both", expand=True, padx=12, pady=12)
+        self._build_sidebar(self.body, default_name, default_port)
+        self._build_main(self.body)
+        self._arrange()
 
         self._refresh_peer_list()
         self._refresh_peer_header()
         self._render_chat()
         self._show_view("chat")
         self._set_online(False)
-        self._log("INFO", f"PeerLink ready. Your LAN address looks like {self.local_ip}. Choose a name and port, then press Start Peer.")
+        self._log("INFO", "PeerLink ready. This computer's addresses: " + ", ".join(self.local_ips)
+                  + ". Choose a name and port, then press Start Peer.")
 
         root.bind_all("<Control-o>", lambda _e: self.choose_file_and_send())
+        root.bind("<Configure>", self._on_root_configure)
         root.protocol("WM_DELETE_WINDOW", self.on_close)
         self._poll_job = root.after(POLL_MS, self._poll_events)
+        root.after(120, self._layout)
 
     # ==================================================================
     # Construction
@@ -284,34 +356,42 @@ class App:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("Nebula.Vertical.TScrollbar", background=C.SURFACE_2, troughcolor=C.BG,
-                        bordercolor=C.BG, lightcolor=C.SURFACE_2, darkcolor=C.SURFACE_2,
+        style.configure("Std.Vertical.TScrollbar", background=C.BORDER, troughcolor=C.SURFACE,
+                        bordercolor=C.SURFACE, lightcolor=C.BORDER, darkcolor=C.BORDER,
                         arrowcolor=C.MUTED, relief="flat", gripcount=0)
-        style.map("Nebula.Vertical.TScrollbar", background=[("active", C.BORDER)])
+        style.map("Std.Vertical.TScrollbar", background=[("active", C.DIM)])
+        style.configure("Chat.Vertical.TScrollbar", background=C.BORDER, troughcolor=C.CHAT_BG,
+                        bordercolor=C.CHAT_BG, lightcolor=C.BORDER, darkcolor=C.BORDER,
+                        arrowcolor=C.MUTED, relief="flat", gripcount=0)
+        style.map("Chat.Vertical.TScrollbar", background=[("active", C.DIM)])
 
     def _build_header(self) -> None:
-        header = tk.Frame(self.root, bg=C.BG)
-        header.pack(fill="x", padx=18, pady=(14, 10))
+        header = tk.Frame(self.root, bg=C.SURFACE)
+        header.pack(fill="x")
+        inner = tk.Frame(header, bg=C.SURFACE)
+        inner.pack(fill="x", padx=16, pady=10)
 
-        logo = tk.Canvas(header, width=50, height=34, bg=C.BG, highlightthickness=0)
+        logo = tk.Canvas(inner, width=50, height=34, bg=C.SURFACE, highlightthickness=0)
         logo.create_oval(3, 4, 29, 30, outline=C.PRIMARY, width=4)
-        logo.create_oval(20, 4, 46, 30, outline=C.MINT, width=4)
+        logo.create_oval(20, 4, 46, 30, outline=C.LOGO_2, width=4)
         logo.create_arc(20, 4, 46, 30, start=100, extent=160, style="arc", outline=C.PRIMARY, width=4)
         logo.pack(side="left")
-        titles = tk.Frame(header, bg=C.BG)
+        titles = tk.Frame(inner, bg=C.SURFACE)
         titles.pack(side="left", padx=(10, 0))
-        tk.Label(titles, text="PeerLink", font=self.f_title, bg=C.BG, fg=C.TEXT).pack(anchor="w")
-        tk.Label(titles, text="Serverless P2P chat & file sharing  -  every peer is a server and a client",
-                 font=self.f_small, bg=C.BG, fg=C.MUTED).pack(anchor="w")
+        tk.Label(titles, text="PeerLink", font=self.f_title, bg=C.SURFACE, fg=C.TEXT).pack(anchor="w")
+        self.tagline = tk.Label(titles, text="Serverless P2P chat & file sharing  -  every peer is a server and a client",
+                                font=self.f_small, bg=C.SURFACE, fg=C.MUTED)
+        self.tagline.pack(anchor="w")
 
-        right = tk.Frame(header, bg=C.BG)
+        right = tk.Frame(inner, bg=C.SURFACE)
         right.pack(side="right")
-        self.pill = tk.Frame(right, bg=C.SURFACE, highlightthickness=1, highlightbackground=C.BORDER)
+        self.pill = tk.Frame(right, bg=C.SURFACE_2, highlightthickness=1, highlightbackground=C.BORDER)
         self.pill.pack(side="right")
-        self.pill_dot = tk.Canvas(self.pill, width=12, height=12, bg=C.SURFACE, highlightthickness=0)
-        self.pill_dot.pack(side="left", padx=(12, 6), pady=9)
-        self.pill_label = tk.Label(self.pill, text="OFFLINE", font=self.f_small_bold, bg=C.SURFACE, fg=C.MUTED)
+        self.pill_dot = tk.Canvas(self.pill, width=12, height=12, bg=C.SURFACE_2, highlightthickness=0)
+        self.pill_dot.pack(side="left", padx=(12, 6), pady=8)
+        self.pill_label = tk.Label(self.pill, text="Offline", font=self.f_small_bold, bg=C.SURFACE_2, fg=C.MUTED)
         self.pill_label.pack(side="left", padx=(0, 14))
+        tk.Frame(self.root, bg=C.BORDER, height=1).pack(fill="x")
 
     def _build_statusbar(self) -> None:
         bar = tk.Frame(self.root, bg=C.SURFACE, highlightthickness=1, highlightbackground=C.BORDER)
@@ -320,17 +400,18 @@ class App:
         self.status_dot.pack(side="left", padx=(14, 6), pady=7)
         self.status_label = tk.Label(bar, text="Ready", font=self.f_small, bg=C.SURFACE, fg=C.MUTED, anchor="w")
         self.status_label.pack(side="left", fill="x", expand=True)
-        tk.Label(bar, text="Downloads: " + self.downloads_dir, font=self.f_small, bg=C.SURFACE,
-                 fg=C.DIM).pack(side="right", padx=14)
+        self.status_path = tk.Label(bar, text="Downloads: " + self.downloads_dir, font=self.f_small,
+                                    bg=C.SURFACE, fg=C.DIM)
+        self.status_path.pack(side="right", padx=14)
         self._toast("Ready", "info")
 
     def _build_sidebar(self, parent: tk.Frame, default_name: str, default_port: int) -> None:
         side = tk.Frame(parent, bg=C.BG, width=330)
-        side.pack(side="left", fill="y", padx=(0, 12))
         side.pack_propagate(False)
+        self.side = side                      # packed by _arrange()
 
         # ---- My Peer -------------------------------------------------
-        card = Card(side, "MY PEER", self.f_small_bold)
+        card = Card(side, "My peer", self.f_bold)
         card.pack(fill="x")
         row = tk.Frame(card.body, bg=C.SURFACE)
         row.pack(fill="x")
@@ -346,12 +427,12 @@ class App:
         self.stop_btn.pack(side="left", fill="x", expand=True)
         self.stop_btn.set_enabled(False)
         self.identity_label = tk.Label(card.body, text="Not running", font=self.f_small, bg=C.SURFACE,
-                                       fg=C.MUTED, anchor="w", justify="left", cursor="arrow")
+                                       fg=C.MUTED, anchor="w", justify="left", cursor="arrow", wraplength=290)
         self.identity_label.pack(fill="x", pady=(10, 0))
         self.identity_label.bind("<Button-1>", self._copy_address)
 
         # ---- Connect -------------------------------------------------
-        card = Card(side, "CONNECT TO ANOTHER PEER", self.f_small_bold)
+        card = Card(side, "Connect to another peer", self.f_bold)
         card.pack(fill="x", pady=(10, 0))
         row = tk.Frame(card.body, bg=C.SURFACE)
         row.pack(fill="x")
@@ -370,36 +451,40 @@ class App:
         card.pack(fill="both", expand=True, pady=(10, 0))
         top = tk.Frame(card, bg=C.SURFACE)
         top.pack(fill="x", padx=14, pady=(12, 6))
-        tk.Label(top, text="CONNECTED PEERS", bg=C.SURFACE, fg=C.PRIMARY_HOVER, font=self.f_small_bold).pack(side="left")
-        self.count_label = tk.Label(top, text="0", bg=C.SURFACE_2, fg=C.TEXT, font=self.f_small_bold, padx=8, pady=1)
+        tk.Label(top, text="Connected peers", bg=C.SURFACE, fg=C.TEXT, font=self.f_bold).pack(side="left")
+        self.count_label = tk.Label(top, text="0", bg=C.PRIMARY_SOFT, fg=C.PRIMARY, font=self.f_small_bold, padx=8, pady=1)
         self.count_label.pack(side="right")
         self.peer_scroll = ScrollFrame(card)
         self.peer_scroll.pack(fill="both", expand=True, padx=6, pady=(0, 8))
 
     def _build_main(self, parent: tk.Frame) -> None:
         main = tk.Frame(parent, bg=C.SURFACE, highlightthickness=1, highlightbackground=C.BORDER)
-        main.pack(side="left", fill="both", expand=True)
+        self.main = main                      # packed by _arrange()
 
         # ---- selected-peer header -----------------------------------
         self.peer_header = tk.Frame(main, bg=C.SURFACE)
-        self.peer_header.pack(fill="x", padx=18, pady=(14, 0))
+        self.peer_header.pack(fill="x", padx=16, pady=(12, 0))
+        self.back_btn = FlatButton(self.peer_header, "< Peers", lambda: self._goto("peers"), "ghost",
+                                   self.f_small_bold, padx=10, pady=6)          # shown in compact mode only
         self.header_avatar_slot = tk.Frame(self.peer_header, bg=C.SURFACE)
         self.header_avatar_slot.pack(side="left")
         text_col = tk.Frame(self.peer_header, bg=C.SURFACE)
-        text_col.pack(side="left", padx=(10, 0))
+        text_col.pack(side="left", padx=(10, 0), fill="x", expand=True)
         self.header_title = tk.Label(text_col, text="", font=self.f_head, bg=C.SURFACE, fg=C.TEXT, anchor="w")
         self.header_title.pack(anchor="w")
-        self.header_sub = tk.Label(text_col, text="", font=self.f_small, bg=C.SURFACE, fg=C.MUTED, anchor="w")
+        self.header_sub = tk.Label(text_col, text="", font=self.f_small, bg=C.SURFACE, fg=C.MUTED, anchor="w",
+                                   justify="left", wraplength=420)
         self.header_sub.pack(anchor="w")
         actions = tk.Frame(self.peer_header, bg=C.SURFACE)
         actions.pack(side="right")
-        FlatButton(actions, "Open Downloads", self.open_downloads, "ghost", self.f_small_bold, padx=12, pady=6).pack(side="left", padx=(0, 6))
+        self.open_btn = FlatButton(actions, "Open Downloads", self.open_downloads, "ghost", self.f_small_bold, padx=12, pady=6)
+        self.open_btn.pack(side="left", padx=(0, 6))
         self.disconnect_btn = FlatButton(actions, "Disconnect", self.disconnect_selected, "danger", self.f_small_bold, padx=12, pady=6)
         self.disconnect_btn.pack(side="left")
 
         # ---- tabs ----------------------------------------------------
         tabs = tk.Frame(main, bg=C.SURFACE)
-        tabs.pack(fill="x", padx=18, pady=(12, 0))
+        tabs.pack(fill="x", padx=16, pady=(10, 0))
         self.tab_widgets: Dict[str, tuple] = {}
         for key, label in (("chat", "Conversation"), ("log", "Event Log")):
             holder = tk.Frame(tabs, bg=C.SURFACE, cursor="hand2")
@@ -411,13 +496,13 @@ class App:
             for widget in (holder, text, underline):
                 widget.bind("<Button-1>", lambda _e, k=key: self._show_view(k))
             self.tab_widgets[key] = (text, underline)
-        tk.Frame(main, bg=C.BORDER, height=1).pack(fill="x", padx=18)
+        tk.Frame(main, bg=C.BORDER, height=1).pack(fill="x")
 
         # ---- composer (packed first at the bottom) -------------------
         composer = tk.Frame(main, bg=C.SURFACE)
-        composer.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
+        composer.pack(side="bottom", fill="x", padx=16, pady=(8, 14))
         self.xfer_frame = tk.Frame(composer, bg=C.SURFACE)
-        self.xfer_label = tk.Label(self.xfer_frame, text="", font=self.f_small, bg=C.SURFACE, fg=C.MINT, anchor="w")
+        self.xfer_label = tk.Label(self.xfer_frame, text="", font=self.f_small, bg=C.SURFACE, fg=C.PRIMARY, anchor="w")
         self.xfer_label.pack(fill="x")
         self.xfer_bar = ProgressBar(self.xfer_frame)
         self.xfer_bar.pack(fill="x", pady=(4, 8))
@@ -425,25 +510,28 @@ class App:
         row.pack(fill="x")
         self.composer_row = row
         self.text_entry = tk.Entry(
-            row, font=(self.f_body[0], 11), bg=C.SURFACE_2, fg=C.TEXT, insertbackground=C.TEXT,
+            row, font=(self.f_body[0], 11), bg=C.SURFACE, fg=C.TEXT, insertbackground=C.TEXT,
             relief="flat", bd=0, highlightthickness=1, highlightbackground=C.BORDER, highlightcolor=C.PRIMARY)
         self.text_entry.pack(side="left", fill="x", expand=True, ipady=9, padx=(0, 8))
         self.text_entry.bind("<Return>", lambda _e: self.send_text_clicked())
-        FlatButton(row, "Send", self.send_text_clicked, "primary", self.f_bold, padx=22, pady=9).pack(side="left", padx=(0, 8))
-        FlatButton(row, "Choose File & Send", self.choose_file_and_send, "success", self.f_bold, padx=16, pady=9).pack(side="left")
-        tk.Label(composer, text="Text, image, audio, video, PDF, ZIP - any file is sent as raw bytes  (Ctrl+O)",
-                 font=self.f_small, bg=C.SURFACE, fg=C.DIM).pack(anchor="w", pady=(6, 0))
+        self.send_btn = FlatButton(row, "Send", self.send_text_clicked, "primary", self.f_bold, padx=22, pady=9)
+        self.send_btn.pack(side="left", padx=(0, 8))
+        self.attach_btn = FlatButton(row, "Choose File & Send", self.choose_file_and_send, "success", self.f_bold, padx=16, pady=9)
+        self.attach_btn.pack(side="left")
+        self.hint_label = tk.Label(composer, text="Text, image, audio, video, PDF, ZIP - any file is sent as raw bytes  (Ctrl+O)",
+                                   font=self.f_small, bg=C.SURFACE, fg=C.DIM)
+        self.hint_label.pack(anchor="w", pady=(6, 0))
 
         # ---- content area -------------------------------------------
-        self.content = tk.Frame(main, bg=C.BG)
-        self.content.pack(fill="both", expand=True, padx=18, pady=12)
+        self.content = tk.Frame(main, bg=C.SURFACE)
+        self.content.pack(fill="both", expand=True, padx=16, pady=10)
 
-        self.chat_frame = tk.Frame(self.content, bg=C.BG)
-        self.chat_text = tk.Text(self.chat_frame, bg=C.BG, fg=C.TEXT, bd=0, highlightthickness=0, wrap="word",
+        self.chat_frame = tk.Frame(self.content, bg=C.CHAT_BG)
+        self.chat_text = tk.Text(self.chat_frame, bg=C.CHAT_BG, fg=C.TEXT, bd=0, highlightthickness=0, wrap="word",
                                  padx=14, pady=10, cursor="arrow", state="disabled", font=self.f_body,
                                  spacing1=5, spacing3=5, takefocus=0, selectbackground=C.BORDER)
         chat_scroll = ttk.Scrollbar(self.chat_frame, orient="vertical", command=self.chat_text.yview,
-                                    style="Nebula.Vertical.TScrollbar")
+                                    style="Chat.Vertical.TScrollbar")
         self.chat_text.configure(yscrollcommand=chat_scroll.set)
         chat_scroll.pack(side="right", fill="y")
         self.chat_text.pack(side="left", fill="both", expand=True)
@@ -453,30 +541,107 @@ class App:
         self.chat_text.tag_configure("empty_title", justify="center", foreground=C.MUTED, font=self.f_head, spacing1=90)
         self.chat_text.tag_configure("empty_sub", justify="center", foreground=C.DIM, font=self.f_body, spacing1=6)
 
-        self.log_frame = tk.Frame(self.content, bg=C.BG)
-        self.log_text = tk.Text(self.log_frame, bg=C.BG, fg=C.TEXT, bd=0, highlightthickness=0, wrap="word",
+        self.log_frame = tk.Frame(self.content, bg=C.SURFACE_2)
+        self.log_text = tk.Text(self.log_frame, bg=C.SURFACE_2, fg=C.TEXT, bd=0, highlightthickness=0, wrap="word",
                                 padx=12, pady=8, state="disabled", font=self.f_mono, spacing1=2, spacing3=2,
                                 selectbackground=C.BORDER, takefocus=0)
         log_scroll = ttk.Scrollbar(self.log_frame, orient="vertical", command=self.log_text.yview,
-                                   style="Nebula.Vertical.TScrollbar")
+                                   style="Std.Vertical.TScrollbar")
         self.log_text.configure(yscrollcommand=log_scroll.set)
         log_scroll.pack(side="right", fill="y")
         self.log_text.pack(side="left", fill="both", expand=True)
         self.log_text.tag_configure("time", foreground=C.DIM)
-        for level, colour in (("INFO", C.MUTED), ("SYSTEM", C.PRIMARY_HOVER), ("CONNECT", C.MINT),
-                              ("TEXT", C.TEXT), ("FILE", C.AMBER), ("ERROR", C.DANGER)):
+        for level, colour in (("INFO", C.MUTED), ("SYSTEM", C.PRIMARY), ("CONNECT", C.SUCCESS),
+                              ("TEXT", C.TEXT), ("FILE", C.WARN), ("ERROR", C.DANGER)):
             self.log_text.tag_configure("lvl_" + level, foreground=colour, font=self.f_mono_bold)
         self.log_text.tag_configure("msg", foreground=C.TEXT)
-        self.log_text.tag_configure("msg_error", foreground="#ffb3be")
+        self.log_text.tag_configure("msg_error", foreground=C.DANGER)
+
+    # ==================================================================
+    # Responsive layout
+    # ==================================================================
+    def _on_root_configure(self, event) -> None:
+        if event.widget is not self.root or self._closing:
+            return
+        if self._resize_job is not None:
+            self.root.after_cancel(self._resize_job)
+        self._resize_job = self.root.after(60, self._layout)
+
+    def _layout(self) -> None:
+        """Adapt the window to its current size (debounced)."""
+        self._resize_job = None
+        if self._closing:
+            return
+        width = self.root.winfo_width()
+        if width <= 1:
+            return
+        compact = width < COMPACT_W
+        side_w = max(270, min(360, int(width * 0.29)))
+        self.side.configure(width=side_w)
+
+        if compact != self.compact:
+            self.compact = compact
+            if compact:
+                self.panel = "chat" if self.selected else "peers"
+            self._arrange()
+
+        wrap = max(220, min(560, width - 90)) if compact else max(220, side_w - 70)
+        self.identity_label.configure(wraplength=wrap)
+
+        set_visible(self.tagline, width >= WIDE_TEXT_W, anchor="w")
+        set_visible(self.status_path, width >= PATH_TEXT_W, side="right", padx=14)
+        set_visible(self.hint_label, not compact, anchor="w", pady=(6, 0))
+        self.open_btn.set_text("Folder" if compact else "Open Downloads")
+        self.attach_btn.set_text("File" if compact else "Choose File & Send")
+
+        main_w = self.main.winfo_width()
+        if main_w > 1:
+            self.header_sub.configure(wraplength=max(160, main_w - 330))
+        self._fit_bubbles()
+
+    def _arrange(self) -> None:
+        """Place sidebar / conversation according to the current mode."""
+        self.side.pack_forget()
+        self.main.pack_forget()
+        if not self.compact:
+            self.side.pack(side="left", fill="y", padx=(0, 12))
+            self.main.pack(side="left", fill="both", expand=True)
+            self.back_btn.pack_forget()
+        elif self.panel == "peers":
+            self.side.pack(fill="both", expand=True)
+        else:
+            self.main.pack(fill="both", expand=True)
+            self.back_btn.pack(side="left", padx=(0, 10), before=self.header_avatar_slot)
+        self.root.after(80, self._fit_bubbles)
+
+    def _goto(self, panel: str) -> None:
+        """Switch panel (only has a visible effect in compact mode)."""
+        self.panel = panel
+        if self.compact:
+            self._arrange()
+
+    def _fit_bubbles(self) -> None:
+        """Re-wrap chat bubbles to ~2/3 of the conversation width."""
+        if self._closing:
+            return
+        width = self.chat_text.winfo_width()
+        if width < 120:
+            return
+        wrap = max(220, min(720, int(width * 0.66)))
+        if abs(wrap - self._bubble_wrap) >= 24:
+            self._bubble_wrap = wrap
+            if self.selected:
+                self._render_chat()
 
     # ==================================================================
     # Small UI helpers
     # ==================================================================
     def _toast(self, message: str, level: str = "info") -> None:
-        colour = {"info": C.MUTED, "ok": C.MINT, "warn": C.AMBER, "error": C.DANGER}[level]
+        colour = {"info": C.MUTED, "ok": C.SUCCESS, "warn": C.WARN, "error": C.DANGER}[level]
+        dot = {"info": C.DIM, "ok": C.SUCCESS_DOT, "warn": C.WARN_DOT, "error": C.DANGER}[level]
         self.status_dot.delete("all")
-        self.status_dot.create_oval(1, 1, 9, 9, fill=colour, outline="")
-        self.status_label.configure(text=message, fg=colour if level != "info" else C.MUTED)
+        self.status_dot.create_oval(1, 1, 9, 9, fill=dot, outline="")
+        self.status_label.configure(text=message, fg=colour)
         if self._toast_job is not None:
             self.root.after_cancel(self._toast_job)
         if level != "info":
@@ -491,11 +656,11 @@ class App:
 
     def _set_online(self, online: bool) -> None:
         self.pill_dot.delete("all")
-        self.pill_dot.create_oval(1, 1, 11, 11, fill=C.MINT if online else C.DIM, outline="")
+        self.pill_dot.create_oval(1, 1, 11, 11, fill=C.SUCCESS_DOT if online else C.DIM, outline="")
         if online and self.node:
-            self.pill_label.configure(text=f"ONLINE  -  {self.node.name}  [{self.node.peer_id}]", fg=C.MINT)
+            self.pill_label.configure(text=f"Online  -  {self.node.name}  [{self.node.peer_id}]", fg=C.SUCCESS)
         else:
-            self.pill_label.configure(text="OFFLINE", fg=C.MUTED)
+            self.pill_label.configure(text="Offline", fg=C.MUTED)
 
     def _show_view(self, view: str) -> None:
         self.view = view
@@ -508,6 +673,7 @@ class App:
         (self.chat_frame if view == "chat" else self.log_frame).pack(fill="both", expand=True)
         if view == "chat":
             self.text_entry.focus_set()
+            self.root.after(40, self._fit_bubbles)
 
     def _copy_address(self, _event=None) -> None:
         if self.node and self.node.is_running:
@@ -576,8 +742,10 @@ class App:
         self.start_btn.set_enabled(False)
         self.stop_btn.set_enabled(True)
         self.connect_btn.set_enabled(True)
+        also = ("\nOther addresses: " + ", ".join(self.local_ips[1:4])) if len(self.local_ips) > 1 else ""
         self.identity_label.configure(
-            text=f"ID  {node.peer_id}   -   listening on {self.local_ip}:{node.port}\nClick to copy your address", fg=C.MINT, cursor="hand2")
+            text=f"ID  {node.peer_id}   -   listening on {self.local_ip}:{node.port}{also}\n"
+                 "Click to copy  -  share the Wi-Fi/LAN address", fg=C.PRIMARY, cursor="hand2")
         self._set_online(True)
         self._refresh_peer_list()
         self._refresh_peer_header()
@@ -606,6 +774,7 @@ class App:
         self._refresh_peer_list()
         self._refresh_peer_header()
         self._render_chat()
+        self._goto("peers")
         self._log("SYSTEM", "Peer stopped. All connections closed.")
         self._toast("Peer stopped", "info")
 
@@ -677,7 +846,7 @@ class App:
 
     def on_close(self) -> None:
         self._closing = True
-        for job in (getattr(self, "_poll_job", None), self._toast_job):
+        for job in (getattr(self, "_poll_job", None), self._toast_job, self._resize_job):
             if job is not None:
                 try:
                     self.root.after_cancel(job)
@@ -713,7 +882,13 @@ class App:
     def _on_error(self, message: str, **_):
         self._fail(message)
 
-    def _on_peer_connected(self, peer_id, name, ip, port, direction="", **_):
+    def _on_peer_connected(self, peer_id, name, ip, port, direction="", replaced=False, **_):
+        if peer_id in self.peers:              # same peer, connection swapped (both sides clicked Connect)
+            self.peers[peer_id].update(name=name, ip=ip, port=port)
+            self._connect_finished()
+            self._refresh_peer_list()
+            self._refresh_peer_header()
+            return
         self.peers[peer_id] = {"name": name, "ip": ip, "port": port,
                                "color": C.AVATARS[self._color_counter % len(C.AVATARS)]}
         self._color_counter += 1
@@ -742,6 +917,8 @@ class App:
             self.selected = self.peer_order[0] if self.peer_order else None
             if self.selected:
                 self.unread.pop(self.selected, None)
+            else:
+                self._goto("peers")
             self._refresh_peer_header()
             self._render_chat()
         self._refresh_peer_list()
@@ -819,6 +996,7 @@ class App:
         self._refresh_peer_header()
         self._render_chat()
         self._show_view("chat")
+        self._goto("chat")
 
     def _refresh_peer_header(self) -> None:
         for child in self.header_avatar_slot.winfo_children():
@@ -850,7 +1028,7 @@ class App:
     def _build_peer_row(self, parent: tk.Frame, peer_id: str) -> None:
         info = self.peers[peer_id]
         selected = peer_id == self.selected
-        bg = C.SURFACE_2 if selected else C.SURFACE
+        bg = C.PRIMARY_SOFT if selected else C.SURFACE
         row = tk.Frame(parent, bg=bg, cursor="hand2")
         row.pack(fill="x", pady=2)
         tk.Frame(row, bg=C.PRIMARY if selected else bg, width=3).pack(side="left", fill="y")
@@ -861,7 +1039,7 @@ class App:
         tk.Label(col, text=f"{peer_id}  -  {info['ip']}:{info['port']}", font=self.f_small, bg=bg, fg=C.MUTED, anchor="w").pack(anchor="w")
         unread = self.unread.get(peer_id, 0)
         if unread:
-            tk.Label(row, text=str(unread), font=self.f_small_bold, bg=C.PRIMARY, fg="#fff", padx=7).pack(side="right", padx=10)
+            tk.Label(row, text=str(unread), font=self.f_small_bold, bg=C.BADGE, fg="#ffffff", padx=7).pack(side="right", padx=10)
 
         def bind_all(widget: tk.Misc) -> None:
             widget.bind("<Button-1>", lambda _e, pid=peer_id: self.select_peer(pid))
@@ -915,30 +1093,32 @@ class App:
 
     def _make_bubble(self, entry: dict) -> tk.Frame:
         mine = entry["mine"]
-        holder = tk.Frame(self.chat_text, bg=C.BG)
+        wrap = self._bubble_wrap
+        holder = tk.Frame(self.chat_text, bg=C.CHAT_BG)
         side = "e" if mine else "w"
         who = "You" if mine else entry["sender"]
-        tk.Label(holder, text=f"{who}  -  {entry['time']}", font=self.f_small, bg=C.BG, fg=C.DIM).pack(anchor=side, padx=3)
+        tk.Label(holder, text=f"{who}  -  {entry['time']}", font=self.f_small, bg=C.CHAT_BG, fg=C.DIM).pack(anchor=side, padx=3)
 
         if entry["kind"] == "text":
-            bubble = tk.Label(holder, text=entry["text"], wraplength=BUBBLE_WRAP, justify="left", anchor="w",
+            bubble = tk.Label(holder, text=entry["text"], wraplength=wrap, justify="left", anchor="w",
                               bg=C.BUBBLE_ME if mine else C.BUBBLE_THEM, fg="#ffffff" if mine else C.TEXT,
                               font=(self.f_body[0], 11), padx=14, pady=9)
             bubble.pack(anchor=side, pady=(2, 0))
         else:
-            bg = C.SURFACE_2
-            card = tk.Frame(holder, bg=bg, highlightthickness=1, highlightbackground=C.MINT if not mine else C.PRIMARY)
+            bg = C.SURFACE
+            card = tk.Frame(holder, bg=bg, highlightthickness=1, highlightbackground=C.PRIMARY if mine else C.BORDER)
             card.pack(anchor=side, pady=(2, 0))
-            tk.Frame(card, bg=C.AMBER, width=4).pack(side="left", fill="y")
+            label, tile_bg, tile_fg = file_badge(entry["filename"])
+            tk.Label(card, text=label, font=self.f_mono_bold, bg=tile_bg, fg=tile_fg, width=6).pack(side="left", fill="y")
             body = tk.Frame(card, bg=bg)
             body.pack(side="left", padx=14, pady=10)
             tk.Label(body, text=entry["filename"], font=self.f_bold, bg=bg, fg=C.TEXT, anchor="w",
-                     wraplength=BUBBLE_WRAP - 60, justify="left").pack(anchor="w")
+                     wraplength=max(140, wrap - 90), justify="left").pack(anchor="w")
             state = "Sent" if mine else "Received - saved to downloads"
             tk.Label(body, text=f"{utils.format_size(entry['size'])}   -   {state}", font=self.f_small,
                      bg=bg, fg=C.MUTED).pack(anchor="w", pady=(2, 0))
             if not mine and entry.get("path"):
-                link = tk.Label(body, text="Show in folder", font=self.f_small_bold, bg=bg, fg=C.MINT, cursor="hand2")
+                link = tk.Label(body, text="Show in folder", font=self.f_small_bold, bg=bg, fg=C.PRIMARY, cursor="hand2")
                 link.pack(anchor="w", pady=(6, 0))
                 link.bind("<Button-1>", lambda _e, p=entry["path"]: self._reveal(p))
         return holder

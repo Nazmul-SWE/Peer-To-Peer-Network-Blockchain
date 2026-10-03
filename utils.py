@@ -140,6 +140,28 @@ def get_local_ip() -> str:
         probe.close()
 
 
+def get_local_ips() -> list:
+    """
+    Every usable IPv4 address of this computer, best guess first.
+
+    A PC often has several adapters (Wi-Fi, Ethernet, VirtualBox, VMware, WSL,
+    hotspot).  Telling a friend the wrong one is the #1 reason a LAN connection
+    fails, so the GUI shows all of them.
+    """
+    found = []
+    primary = get_local_ip()
+    if primary != "127.0.0.1":
+        found.append(primary)
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            address = info[4][0]
+            if address not in found and not address.startswith(("127.", "169.254.")):
+                found.append(address)
+    except OSError:
+        pass
+    return found or ["127.0.0.1"]
+
+
 def open_folder(path: str, select_file: bool = False) -> bool:
     """Open a folder (or reveal a file) in the OS file manager."""
     try:

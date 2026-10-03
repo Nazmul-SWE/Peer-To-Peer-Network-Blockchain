@@ -50,6 +50,8 @@ log = logging.getLogger(__name__)
 CONNECT_TIMEOUT = 5.0       # seconds to establish the TCP connection
 HANDSHAKE_TIMEOUT = 10.0     # seconds a new peer has to complete the HELLO exchange
 ACCEPT_POLL = 0.5           # accept() wakes up this often to notice stop()
+YOUNG_CONNECTION = 3.0      # a connection younger than this gets a grace period before
+DISCONNECT_GRACE = 0.6      # ... "disconnected" is reported (see PeerNode._drop)
 PROGRESS_INTERVAL = 0.08    # throttle for file_progress events (seconds)
 
 
@@ -64,6 +66,14 @@ def describe_error(exc: BaseException) -> str:
     if isinstance(exc, protocol.ConnectionClosed):
         return "Connection closed by peer"
     return str(exc) or exc.__class__.__name__
+
+
+class HandshakeRefused(protocol.ProtocolError):
+    """The other peer answered our hello with an explicit 'error' message."""
+
+    def __init__(self, reason: str, code: str = "") -> None:
+        super().__init__(reason)
+        self.code = code
 
 
 class PeerConnection:
@@ -206,23 +216,26 @@ class PeerNode:
             sock.settimeout(HANDSHAKE_TIMEOUT)
             hello = protocol.recv_message(sock)
             if hello.get("type") != protocol.MSG_HELLO:
-                raise protocol.ProtocolError("expected a 'hello' message first")
+                raise protocol.ProtocolError(
+                    f"expected a 'hello' message first but got {protocol.preview(hello)}")
             peer_id, name, port = protocol.parse_handshake(hello)
 
             if peer_id == self.peer_id:
-                protocol.send_message(sock, protocol.make_error("A peer cannot connect to itself"))
+                protocol.send_message(sock, protocol.make_error("A peer cannot connect to itself", "self"))
                 sock.close()
                 return
 
             conn = PeerConnection(sock, peer_id, name, addr[0], port, "incoming")
-            if not self._try_register(conn):
-                protocol.send_message(sock, protocol.make_error("Already connected"))
+            outcome = self._try_register(conn)
+            if outcome is None:
+                conn = None
+                protocol.send_message(sock, protocol.make_error("Already connected", "duplicate"))
                 sock.close()
                 return
 
             protocol.send_message(sock, protocol.make_hello_ack(self.peer_id, self.name, self.port))
             sock.settimeout(None)
-            self._activate(conn)
+            self._activate(conn, replaced=(outcome == "replaced"))
         except (OSError, protocol.ProtocolError) as exc:
             if conn is not None:
                 self._drop(conn, notify=False)
@@ -262,22 +275,29 @@ class PeerNode:
             sock.settimeout(CONNECT_TIMEOUT)
             sock.connect((ip, port))                                  # connect()
             self._tune(sock)
+            sock.settimeout(HANDSHAKE_TIMEOUT)
 
             protocol.send_message(sock, protocol.make_hello(self.peer_id, self.name, self.port))
             reply = protocol.recv_message(sock)
-            if reply.get("type") == protocol.MSG_ERROR:
-                raise protocol.ProtocolError(str(reply.get("reason", "peer refused the connection")))
-            if reply.get("type") != protocol.MSG_HELLO_ACK:
-                raise protocol.ProtocolError("expected 'hello_ack' from peer")
-            peer_id, name, remote_port = protocol.parse_handshake(reply)
+            kind = reply.get("type")
+            if kind == protocol.MSG_ERROR:
+                raise HandshakeRefused(str(reply.get("reason", "peer refused the connection")),
+                                       str(reply.get("code", "")))
+            if kind not in (protocol.MSG_HELLO_ACK, protocol.MSG_HELLO):
+                raise protocol.ProtocolError(
+                    f"the peer answered with message type {kind!r} instead of 'hello_ack' "
+                    f"(reply: {protocol.preview(reply)}). Is {ip}:{port} really a PeerLink peer?")
+            peer_id, name, _remote_port = protocol.parse_handshake(reply, default_port=port)
             if peer_id == self.peer_id:
                 raise protocol.ProtocolError("A peer cannot connect to itself")
 
             conn = PeerConnection(sock, peer_id, name, ip, port, "outgoing")
-            if not self._running or not self._try_register(conn):
-                raise protocol.ProtocolError(f"Already connected to {name}")
+            outcome = self._try_register(conn) if self._running else None
+            if outcome is None:
+                conn = None
+                raise HandshakeRefused(f"Already connected to {name}", "duplicate")
             sock.settimeout(None)
-            self._activate(conn)
+            self._activate(conn, replaced=(outcome == "replaced"))
         except (OSError, protocol.ProtocolError) as exc:
             if conn is not None:
                 self._drop(conn, notify=False)
@@ -286,8 +306,11 @@ class PeerNode:
                     sock.close()
                 except OSError:
                     pass
-            self._emit("connect_failed", ip=ip, port=port,
-                       message=f"Connection failed: {describe_error(exc)}")
+            if isinstance(exc, HandshakeRefused) and exc.code == "duplicate":
+                message = str(exc) if str(exc).startswith("Already") else "Already connected to that peer"
+            else:
+                message = f"Connection failed: {describe_error(exc)}"
+            self._emit("connect_failed", ip=ip, port=port, message=message)
 
     # ------------------------------------------------------------------
     # Connection bookkeeping
@@ -297,29 +320,55 @@ class PeerNode:
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
 
-    def _try_register(self, conn: PeerConnection) -> bool:
-        with self._lock:
-            if not self._running or conn.peer_id in self._connections:
-                return False
-            self._connections[conn.peer_id] = conn
-            return True
+    def _initiator_of(self, conn: PeerConnection) -> str:
+        """peer_id of the side that dialled this connection."""
+        return self.peer_id if conn.direction == "outgoing" else conn.peer_id
 
-    def _activate(self, conn: PeerConnection) -> None:
+    def _try_register(self, conn: PeerConnection) -> Optional[str]:
+        """
+        Add ``conn`` to the table.  Returns "new", "replaced" or None (rejected).
+
+        If two peers click *Connect* on each other at the same moment there are
+        briefly TWO TCP connections between them.  Both sides must keep the same
+        one, so the rule is deterministic: keep the connection that was dialled
+        by the peer with the smaller peer_id.  The loser is closed silently.
+        """
+        loser: Optional[PeerConnection] = None
+        with self._lock:
+            if not self._running:
+                return None
+            existing = self._connections.get(conn.peer_id)
+            if existing is None:
+                self._connections[conn.peer_id] = conn
+                return "new"
+            if self._initiator_of(conn) < self._initiator_of(existing):
+                self._connections[conn.peer_id] = conn
+                loser, outcome = existing, "replaced"
+            else:
+                return None
+        self._drop(loser, notify=False)        # outside the lock; silent (not registered any more)
+        return outcome
+
+    def _activate(self, conn: PeerConnection, replaced: bool = False) -> None:
         """Handshake done: start this connection's reader and writer threads."""
         threading.Thread(target=self._reader_loop, args=(conn,),
                          name=f"reader-{conn.name}", daemon=True).start()
         threading.Thread(target=self._writer_loop, args=(conn,),
                          name=f"writer-{conn.name}", daemon=True).start()
         self._emit("peer_connected", peer_id=conn.peer_id, name=conn.name,
-                   ip=conn.ip, port=conn.port, direction=conn.direction)
+                   ip=conn.ip, port=conn.port, direction=conn.direction, replaced=replaced)
 
-    def _drop(self, conn: PeerConnection, reason: str = "", notify: bool = True) -> None:
-        """Idempotently tear down a connection (safe from any thread)."""
+    def _drop(self, conn: PeerConnection, reason: str = "", notify: bool = True,
+              grace: bool = False) -> None:
+        """Idempotently tear down a connection (safe from any thread).
+        ``peer_disconnected`` is only reported if this was the *registered*
+        connection - a duplicate that lost the tie-break closes silently."""
         with self._lock:
             if conn.closed:
                 return
             conn.closed = True
-            if self._connections.get(conn.peer_id) is conn:
+            was_registered = self._connections.get(conn.peer_id) is conn
+            if was_registered:
                 del self._connections[conn.peer_id]
         conn.outbox.put(None)                       # wake + stop the writer
         try:
@@ -330,7 +379,23 @@ class PeerNode:
             conn.sock.close()
         except OSError:
             pass
-        if notify:
+        if notify and was_registered:
+            if grace and time.time() - conn.connected_at < YOUNG_CONNECTION:
+                # A brand-new connection dying is usually the loser of a simultaneous
+                # connect: wait briefly - if the surviving connection registers, the
+                # peer never really went away and the GUI should not flicker.
+                timer = threading.Timer(DISCONNECT_GRACE, self._report_disconnect_if_gone,
+                                        args=(conn, reason))
+                timer.daemon = True
+                timer.start()
+            else:
+                self._emit("peer_disconnected", peer_id=conn.peer_id, name=conn.name,
+                           reason=reason or "connection closed")
+
+    def _report_disconnect_if_gone(self, conn: PeerConnection, reason: str) -> None:
+        with self._lock:
+            back = conn.peer_id in self._connections
+        if not back and self._running:
             self._emit("peer_disconnected", peer_id=conn.peer_id, name=conn.name,
                        reason=reason or "connection closed")
 
@@ -372,7 +437,7 @@ class PeerNode:
                            message=f"Protocol error from {conn.name}: {exc}")
         except OSError as exc:
             reason = describe_error(exc)
-        self._drop(conn, reason=reason)
+        self._drop(conn, reason=reason, grace=True)
 
     def _on_text(self, conn: PeerConnection, message: dict) -> None:
         text = message.get("message")

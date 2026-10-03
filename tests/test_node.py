@@ -192,6 +192,105 @@ class ConnectionErrors(NodeTestCase):
         silent.close()
 
 
+def fake_peer(handler):
+    """A throw-away TCP server that behaves like a *foreign* implementation."""
+    server = socket.socket(); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0)); server.listen()
+
+    def run():
+        conn, _ = server.accept()
+        try:
+            conn.settimeout(5)
+            handler(conn)
+        except OSError:
+            pass
+        finally:
+            time.sleep(0.5)
+            conn.close(); server.close()
+    threading.Thread(target=run, daemon=True).start()
+    return server.getsockname()[1]
+
+
+class Interop(NodeTestCase):
+    def _connect_to_fake(self, reply):
+        def handler(conn):
+            protocol.recv_message(conn)
+            if reply is not None:
+                protocol.send_message(conn, reply)
+        port = fake_peer(handler)
+        a = self.make("Alice")
+        a[0].connect_to_peer("127.0.0.1", port)
+        return a
+
+    def test_wrong_reply_type_names_the_type(self):
+        a = self._connect_to_fake({"type": "welcome", "peer_id": "zz"})
+        msg = a[1].wait_for("connect_failed")["message"]
+        self.assertIn("'welcome'", msg)
+        self.assertIn("hello_ack", msg)
+
+    def test_foreign_ack_spellings_and_missing_port_are_accepted(self):
+        for reply in ({"type": "HELLO-ACK", "peer_id": "f1", "peer_name": "Foreign"},
+                      {"type": "hello ack", "peer_id": "f2", "name": "Foreign", "port": "6000"},
+                      {"type": "hello", "peer_id": "f3", "peer_name": "Symmetric", "port": 6001}):
+            a = self._connect_to_fake(reply)
+            got = a[1].wait_for("peer_connected")
+            self.assertEqual(got["name"], reply.get("peer_name", reply.get("name")))
+
+    def test_peer_that_closes_without_replying(self):
+        a = self._connect_to_fake(None)
+        self.assertIn("closed", a[1].wait_for("connect_failed")["message"].lower())
+
+    def test_non_peerlink_server_gives_clear_error(self):
+        def handler(conn):
+            conn.recv(100); conn.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
+        port = fake_peer(handler)
+        a = self.make("Alice")
+        a[0].connect_to_peer("127.0.0.1", port)
+        self.assertIn("Connection failed", a[1].wait_for("connect_failed")["message"])
+
+    def test_acceptor_accepts_uppercase_hello(self):
+        a = self.make("Alice")
+        s = socket.create_connection(("127.0.0.1", a[0].port))
+        protocol.send_message(s, {"type": "HELLO", "peer_id": "xx1", "peer_name": "Raw", "port": 7000})
+        self.assertEqual(protocol.recv_message(s)["type"], "hello_ack")
+        a[1].wait_for("peer_connected", peer_id="xx1")
+        s.close()
+
+
+class SimultaneousConnect(NodeTestCase):
+    def test_both_peers_click_connect_at_the_same_time(self):
+        """Regression for the 'connected, then disconnected' lab scenario."""
+        for round_number in range(20):
+            a, b = self.make(f"A{round_number}"), self.make(f"B{round_number}")
+            barrier = threading.Barrier(2)
+
+            def dial(src, dst):
+                barrier.wait()
+                src[0].connect_to_peer("127.0.0.1", dst[0].port)
+            t1 = threading.Thread(target=dial, args=(a, b)); t2 = threading.Thread(target=dial, args=(b, a))
+            t1.start(); t2.start(); t1.join(); t2.join()
+            a[1].wait_for("peer_connected", peer_id=b[0].peer_id)
+            b[1].wait_for("peer_connected", peer_id=a[0].peer_id)
+            time.sleep(0.3)                                    # let any loser connection die
+            self.assertEqual(len(a[0].get_connected_peers()), 1, f"round {round_number}")
+            self.assertEqual(len(b[0].get_connected_peers()), 1, f"round {round_number}")
+            # the surviving connection must be the SAME TCP connection on both ends and usable both ways
+            self.assertTrue(a[0].send_text(b[0].peer_id, f"a->b {round_number}"))
+            self.assertTrue(b[0].send_text(a[0].peer_id, f"b->a {round_number}"))
+            b[1].wait_for("text_received", text=f"a->b {round_number}")
+            a[1].wait_for("text_received", text=f"b->a {round_number}")
+            self.assertEqual(a[1].count("peer_disconnected"), 0, "loser connection must not be reported as a disconnect")
+            self.assertEqual(b[1].count("peer_disconnected"), 0)
+
+    def test_sequential_duplicate_dial_is_reported_not_fatal(self):
+        a, b = self.make("Alice"), self.make("Bob")
+        self.link(a, b)
+        a[0].connect_to_peer("127.0.0.1", b[0].port)          # a dials again
+        self.assertIn("Already", a[1].wait_for("connect_failed")["message"])
+        self.assertTrue(a[0].send_text(b[0].peer_id, "still works"))
+        b[1].wait_for("text_received", text="still works")
+
+
 class FileTransfer(NodeTestCase):
     def _send_and_check(self, sender, receiver, path, expected_name=None):
         sender[0].send_file(receiver[0].peer_id, path)
